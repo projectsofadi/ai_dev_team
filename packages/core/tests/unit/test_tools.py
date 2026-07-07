@@ -106,3 +106,56 @@ class TestShellTool:
         result = await tool.execute(command="rm -rf /")
         assert not result.ok
         assert "not in allowed" in (result.error or "").lower()
+
+    # --- Security regression tests: shell command injection (RCE) --------------
+    # ShellTool must (a) deny by default when no allow-list is supplied and
+    # (b) never let LLM-supplied shell metacharacters chain extra commands.
+    # Each injection test writes a sentinel file and proves the injected `rm`
+    # never runs. These FAIL against a fail-open / `/bin/sh -c` implementation.
+
+    async def test_default_denies_unlisted_command(self, shell_tool: ShellTool):
+        # No explicit allow-list must NOT mean "run anything" (fail-safe default).
+        # `whoami` is deliberately absent from the default allow-list.
+        result = await shell_tool.execute(command="whoami")
+        assert not result.ok
+        assert "not in allowed" in (result.error or "").lower()
+
+    async def test_injection_via_semicolon_blocked(self, tmp_dir: str):
+        sentinel = os.path.join(tmp_dir, "sentinel_semi.txt")
+        with open(sentinel, "w") as f:
+            f.write("keep me")
+        tool = ShellTool(working_dir=tmp_dir, allowed_commands=["echo"])
+        result = await tool.execute(command=f"echo pwned ; rm -f {sentinel}")
+        assert os.path.exists(sentinel), "command chaining via ';' executed rm (RCE)"
+        assert not result.ok
+
+    async def test_injection_via_command_substitution_blocked(self, tmp_dir: str):
+        sentinel = os.path.join(tmp_dir, "sentinel_subst.txt")
+        with open(sentinel, "w") as f:
+            f.write("keep me")
+        tool = ShellTool(working_dir=tmp_dir, allowed_commands=["echo"])
+        result = await tool.execute(command=f"echo $(rm -f {sentinel})")
+        assert os.path.exists(sentinel), "command substitution '$(...)' executed rm (RCE)"
+        assert not result.ok
+
+    async def test_injection_via_pipe_blocked(self, tmp_dir: str):
+        sentinel = os.path.join(tmp_dir, "sentinel_pipe.txt")
+        with open(sentinel, "w") as f:
+            f.write("keep me")
+        tool = ShellTool(working_dir=tmp_dir, allowed_commands=["echo"])
+        result = await tool.execute(command=f"echo x | rm -f {sentinel}")
+        assert os.path.exists(sentinel), "pipe executed rm (RCE)"
+        assert not result.ok
+
+    async def test_quoted_args_preserved(self, tmp_dir: str):
+        # Legitimate single commands with quoted args still work under shlex/exec.
+        tool = ShellTool(working_dir=tmp_dir, allowed_commands=["echo"])
+        result = await tool.execute(command='echo "hello   world"')
+        assert result.ok
+        assert "hello   world" in (result.data or "")
+
+    async def test_malformed_quotes_handled(self, shell_tool: ShellTool):
+        # Unbalanced quotes must fail cleanly, not raise.
+        result = await shell_tool.execute(command='echo "unterminated')
+        assert not result.ok
+        assert result.error

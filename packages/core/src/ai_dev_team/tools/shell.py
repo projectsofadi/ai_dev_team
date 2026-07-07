@@ -1,20 +1,66 @@
-"""Shell command execution tool with sandboxing."""
+"""Shell command execution tool.
+
+Commands run via ``asyncio.create_subprocess_exec`` (NOT a shell), so shell
+metacharacters supplied by the LLM (``;`` ``|`` ``&`` ``$()`` `` ` `` redirects)
+are never interpreted and cannot chain or inject additional commands. Commands
+are further restricted to an allow-list of program names, deny-by-default.
+
+This is a guardrail, not a hermetic sandbox: allow-listed interpreters
+(``python``, ``make``, ``npm`` …) can still execute arbitrary code. For real
+isolation, run the agent inside a container/VM and enforce approval at the
+registry layer (see ``require_approval_for_shell`` in ``config.py``).
+"""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import shlex
 from typing import Any
 
 from ai_dev_team.tools.base import BaseTool, ToolResult
 
+# Program names permitted when no explicit allow-list is supplied. Scoped to
+# read / build / test / VCS tooling; destructive (``rm``/``mv``), network
+# (``curl``/``wget``/``nc``), privilege-escalation (``sudo``), and shell-reentry
+# (``bash``/``sh``) commands are intentionally excluded. File mutations should go
+# through ``FilesystemTool``, which is path-traversal guarded.
+DEFAULT_ALLOWED_COMMANDS: frozenset[str] = frozenset({
+    # inspection
+    "ls", "cat", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "grep",
+    "egrep", "fgrep", "rg", "find", "diff", "stat", "file", "which", "env",
+    "date", "echo", "printf", "pwd", "basename", "dirname", "realpath", "tree",
+    "true", "false", "test", "sleep",
+    # python
+    "python", "python3", "pip", "pip3", "uv", "pytest", "ruff", "mypy",
+    "black", "isort", "flake8",
+    # node / typescript
+    "node", "npm", "npx", "pnpm", "yarn", "tsc", "eslint", "prettier",
+    "vitest", "jest",
+    # build / other languages / VCS
+    "make", "go", "cargo", "rustc", "java", "javac", "mvn", "gradle", "git",
+})
+
+# Shell control operators that signal an attempt to chain, substitute, background,
+# or redirect additional commands. Rejected up-front with a clear error;
+# ``create_subprocess_exec`` already neutralises them, but failing loud beats
+# silently passing them through as literal arguments.
+_SHELL_OPERATORS: tuple[str, ...] = (";", "|", "&", "`", "$(", ">", "<", "\n", "\r")
+
 
 class ShellTool(BaseTool):
-    """Execute shell commands with timeout and output capture."""
+    """Execute a single allow-listed command with timeout and output capture."""
 
     def __init__(self, working_dir: str | None = None, allowed_commands: list[str] | None = None):
         self._working_dir = working_dir or os.getcwd()
-        self._allowed_commands = allowed_commands
+        # ``None`` -> safe default allow-list; an explicit list (even empty) is
+        # honoured verbatim, so ``allowed_commands=[]`` denies everything.
+        self._allowed_commands: frozenset[str] = (
+            DEFAULT_ALLOWED_COMMANDS
+            if allowed_commands is None
+            else frozenset(allowed_commands)
+        )
 
     @property
     def name(self) -> str:
@@ -62,24 +108,48 @@ class ShellTool(BaseTool):
     ) -> ToolResult:
         cwd = working_dir or self._working_dir
 
-        if self._allowed_commands:
-            base_cmd = command.split()[0] if command.split() else ""
-            if base_cmd not in self._allowed_commands:
+        # Layer 1: reject shell control operators (chaining / substitution /
+        # redirection). Fail loud rather than run one command and silently drop
+        # the rest.
+        for op in _SHELL_OPERATORS:
+            if op in command:
                 return ToolResult(
                     ok=False,
-                    error=f"Command '{base_cmd}' not in allowed list: {self._allowed_commands}",
+                    error=(
+                        f"Refused: shell operator {op!r} is not permitted. Run one "
+                        "command at a time; use the filesystem tool for file I/O."
+                    ),
                 )
 
+        # Layer 2: parse without any shell interpretation.
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
+            argv = shlex.split(command)
+        except ValueError as exc:
+            return ToolResult(ok=False, error=f"Could not parse command: {exc}")
+        if not argv:
+            return ToolResult(ok=False, error="Empty command")
+
+        # Layer 3: deny-by-default allow-list on the program name.
+        program = argv[0]
+        if program not in self._allowed_commands:
+            return ToolResult(
+                ok=False,
+                error=(
+                    f"Command '{program}' not in allowed commands: "
+                    f"{sorted(self._allowed_commands)}"
+                ),
+            )
+
+        # Execute directly — no /bin/sh, so metacharacters cannot inject.
+        proc: asyncio.subprocess.Process | None = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
             output_parts: list[str] = []
             if stdout:
@@ -101,7 +171,12 @@ class ShellTool(BaseTool):
                 meta={"exit_code": proc.returncode, "command": command},
             )
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
+            if proc is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
             return ToolResult(ok=False, error=f"Command timed out after {timeout}s")
+        except FileNotFoundError:
+            return ToolResult(ok=False, error=f"Command not found: {argv[0]}")
         except Exception as exc:
             return ToolResult(ok=False, error=f"Shell error: {type(exc).__name__}: {exc}")
