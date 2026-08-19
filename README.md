@@ -1,201 +1,193 @@
 # AI Dev Team
 
-A production-grade, polyglot multi-agent development system that simulates a full
-software development team: **Planner**, **Coder**, **Reviewer**, **Tester**, and
-**Orchestrator** agents working together to plan, implement, review, and test code.
+An experimental reference implementation of a multi-agent software-development
+workflow. It contains Planner, Coder, Reviewer, Tester, and Orchestrator agents,
+a Python runtime, and a TypeScript REST/A2A/WebSocket gateway.
+
+> **Status: prototype, not production-ready.** Run it only against a dedicated,
+> disposable workspace. The tool controls are guardrails, not a hermetic sandbox;
+> an approved interpreter or build tool can execute arbitrary project code.
+
+## What works today
+
+- The Python CLI runs the multi-agent orchestrator against OpenAI or Anthropic.
+- REST and A2A submissions dispatch to the Python core through a no-shell
+  subprocess bridge.
+- REST, A2A task methods, and WebSocket interfaces share API-key
+  authentication; the discovery card is intentionally public.
+- REST/A2A task transitions are broadcast to subscribed WebSocket clients.
+- Filesystem tools resolve paths inside a configured workspace and reject sibling
+  prefix/path-traversal escapes.
+- Tool arguments and outputs are validated; likely secret-bearing output is
+  blocked before it is returned to the model.
+- Write and shell approvals fail closed by default when no approval callback is
+  available.
+- The agent loop tracks token, iteration, wall-clock, and estimated-cost budgets
+  and refuses another provider call once measured usage reaches a limit.
+
+## Known limitations
+
+- Task records are held in memory and are lost when the API process restarts.
+- The HTTP gateway permits one local Python subprocess in the shared workspace;
+  concurrent submissions fail rather than queue. There is no distributed queue,
+  retry worker, or multi-node coordination.
+- Cancellation waits for process exit and escalates from `SIGTERM` to `SIGKILL`,
+  but it is not a transactional rollback of changes an approved tool may already
+  have made.
+- A2A support is a deliberately small, experimental JSON-RPC subset. Its card
+  advertises protocol version `0.0`, not A2A v1 conformance, because mandatory
+  v1 operations such as `ListTasks` are not implemented.
+- The approval callback is available in the Python core, but the HTTP API does
+  not yet expose an interactive approval UI/transport. With safe defaults,
+  the gateway forces write and shell approvals on, so HTTP-submitted mutations
+  are refused in this release.
+- OpenTelemetry helpers and storage components exist, but coverage is incomplete
+  across the full Node-to-Python path.
+- Model output is nondeterministic and must be reviewed like any other generated
+  code.
+- Token and cost limits are post-response safeguards, not billing guarantees. A
+  single in-flight provider call can overshoot them, and cost figures use static
+  estimates rather than provider invoices.
+- Task descriptions and workspace content selected by an agent can be sent to
+  the configured model provider. Use only non-sensitive, disposable material
+  and review that provider's data-handling terms.
 
 ## Architecture
 
-```
-                    ┌──────────────────┐
-                    │   CLI / API      │  TypeScript
-                    └────────┬─────────┘
-                             │ A2A / REST / WebSocket
-                    ┌────────┴─────────┐
-                    │   Orchestrator   │  Python
-                    └──┬───┬───┬───┬──┘
-          ┌────────────┤   │   │   ├────────────┐
-          ▼            ▼   │   ▼   │            ▼
-    ┌──────────┐ ┌────────┐│┌──────────┐ ┌──────────┐
-    │ Planner  │ │ Coder  │││ Reviewer │ │ Tester   │
-    └──────────┘ └────┬───┘│└──────────┘ └────┬─────┘
-                      │    │                   │
-              ┌───────┴────┴───────────────────┴──┐
-              │         Tools via MCP              │
-              │  Shell │ Filesystem │ Git │ Search │
-              └────────────────────────────────────┘
+```text
+CLI / REST / A2A
+        |
+        v
+TypeScript API -- authenticated WebSocket updates
+        |
+        | spawn(argv), never a shell
+        v
+Python bridge -> Orchestrator -> Planner / Coder / Reviewer / Tester
+                                      |
+                                      v
+                         dedicated workspace tools
 ```
 
-**Key design decisions:**
+The REST and A2A adapters share the same in-memory task registry. The gateway
+passes the task ID as an argument, sends the description over stdin, starts
+Python in isolated import mode from a trusted directory, and accepts only a
+matching terminal result from the bridge.
 
-- **Custom framework-agnostic** — built from primitives, no dependency on LangChain/CrewAI/etc.
-- **Polyglot** — Python core (agents, LLM, tools, memory) + TypeScript (API server, CLI)
-- **A2A Protocol** — Agent-to-Agent JSON-RPC 2.0 for external interoperability
-- **MCP** — Model Context Protocol for tool integration
-- **OpenTelemetry** — GenAI semantic conventions for tracing
-- **Provider-agnostic** — supports OpenAI and Anthropic with a unified abstraction
+Direct CLI task descriptions are ordinary process arguments and may be visible
+to other local users through process inspection. Never place credentials or
+private source text in a CLI argument.
 
-## Quick Start
-
-### Prerequisites
+## Prerequisites
 
 - Python 3.11+
-- Node.js 20+
+- Node.js 22+
 - An OpenAI or Anthropic API key
+- A dedicated directory that the agents are allowed to inspect
 
-### Installation
+## Local setup
 
 ```bash
-# Clone the repo
 git clone git@github.com:projectsofadi/ai_dev_team.git
 cd ai_dev_team
 
-# Copy environment config
-cp .env.example .env
-# Edit .env with your API keys
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e "packages/core[dev]"
+npm ci --prefix packages/server
+npm ci --prefix packages/cli
 
-# Install everything
-make install
+mkdir -p workspace
+export API_KEY="$(openssl rand -hex 32)"
+export AGENT_WORKSPACE="$PWD/workspace"
+export OPENAI_API_KEY="your-provider-key"
+export DEFAULT_PROVIDER="openai"
+
+npm run dev --prefix packages/server
 ```
 
-### Running a Task (Python CLI)
+The API listens on `127.0.0.1:8080` unless `API_HOST` is set. Cross-origin browser
+requests are denied unless their exact origins are listed in the comma-separated
+`CORS_ORIGINS` variable.
+
+Submit a task:
 
 ```bash
-cd packages/core
-ai-dev-team "Create a Python function that sorts a list using merge sort"
-```
-
-### Running the API Server
-
-```bash
-# Start the API server
-make dev-server
-
-# In another terminal, submit a task
-curl -X POST http://localhost:8080/api/tasks \
+curl -X POST http://127.0.0.1:8080/api/tasks \
+  -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"description": "Add input validation to the user registration endpoint"}'
+  -d '{"description":"Explain the files in this workspace"}'
 ```
 
-### Using the TypeScript CLI
+Or use the TypeScript CLI:
 
 ```bash
-cd packages/cli
-npx tsx src/index.ts run "Implement a binary search tree with insert, delete, and search"
-npx tsx src/index.ts status
+export AI_DEV_TEAM_API_KEY="$API_KEY"
+npm run dev --prefix packages/cli -- \
+  run --watch "Explain the files in this workspace"
 ```
 
-### Running Tests
+## Approval behavior
+
+These defaults are intentional:
+
+```dotenv
+REQUIRE_APPROVAL_FOR_WRITES=true
+REQUIRE_APPROVAL_FOR_SHELL=true
+```
+
+Without an approval callback, relevant calls are denied and never executed. The
+HTTP bridge always enforces both settings and currently has no approval
+transport. Library users can embed the Python agents with an explicit approval
+callback, but that capability is intentionally not exposed by the server.
+
+## API surface
+
+All stateful endpoints require `Authorization: Bearer <API_KEY>` or an
+`X-Api-Key` header. WebSocket authentication uses the Authorization header.
+`/health` and the discovery card are public; the card contains no credential or
+private task data.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness check |
+| `POST` | `/api/tasks` | Submit and dispatch a task |
+| `GET` | `/api/tasks` | List in-memory task records |
+| `GET` | `/api/tasks/:id` | Read task status |
+| `DELETE` | `/api/tasks/:id` | Delete a non-running record |
+| `POST` | `/api/tasks/:id/cancel` | Terminate a running subprocess |
+| `GET` | `/.well-known/agent-card.json` | Public experimental discovery card |
+| `POST` | `/a2a` | Authenticated JSON-RPC subset |
+| `WS` | `/ws` | Authenticated task subscriptions |
+
+## Verification
 
 ```bash
-make test          # Full test suite with coverage
-make test-unit     # Unit tests only
+pytest -q packages/core/tests
+ruff check packages/core/src packages/core/tests
+ruff format --check packages/core/src packages/core/tests
+mypy --config-file packages/core/pyproject.toml packages/core/src/ai_dev_team
+npm test --prefix packages/server
+npm test --prefix packages/cli
+python -m build packages/core
 ```
 
-## Project Structure
+CI runs the same Python and TypeScript gates. See [DEPLOY.md](DEPLOY.md) for the
+Docker prototype and its security constraints.
 
-```
-ai_dev_team/
-├── packages/
-│   ├── core/                    # Python — Agent framework
-│   │   ├── src/ai_dev_team/
-│   │   │   ├── agents/          # Orchestrator, Planner, Coder, Reviewer, Tester
-│   │   │   ├── llm/             # Provider abstraction (OpenAI + Anthropic)
-│   │   │   ├── tools/           # Shell, Filesystem, Git, Search + MCP server
-│   │   │   ├── memory/          # Working memory, long-term (ChromaDB), SQLite store
-│   │   │   ├── orchestration/   # Engine, ExecutionPlan, task state machine
-│   │   │   ├── tracing/         # OpenTelemetry + GenAI semantic conventions
-│   │   │   ├── guardrails/      # Validation, budget enforcement
-│   │   │   └── config.py        # Settings via pydantic-settings
-│   │   └── tests/
-│   ├── server/                  # TypeScript — REST + WebSocket + A2A
-│   └── cli/                     # TypeScript — CLI interface
-├── docker-compose.yml           # API + Jaeger for tracing
-├── Makefile                     # Common commands
-└── .env.example                 # Configuration template
+## Project layout
+
+```text
+packages/core/    Python agents, providers, tools, memory, guardrails, bridge
+packages/server/  REST, A2A, WebSocket gateway and subprocess task runner
+packages/cli/     TypeScript client
 ```
 
-## Agent Roles
+## Security reporting
 
-| Agent | Role | Tools |
-|-------|------|-------|
-| **Orchestrator** | Coordinator — decomposes tasks, delegates via handoffs, synthesizes results | Handoff tools (transfer_to_*) |
-| **Planner** | Breaks high-level tasks into structured ExecutionPlans with steps & dependencies | create_plan |
-| **Coder** | Writes production-ready code following project conventions | filesystem, shell, git, search |
-| **Reviewer** | Reviews code for correctness, security, style, performance | filesystem, git, search |
-| **Tester** | Writes and runs tests, reports coverage gaps | filesystem, shell, search |
-
-## Configuration
-
-All settings are loaded from environment variables or `.env`:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OPENAI_API_KEY` | — | OpenAI API key |
-| `ANTHROPIC_API_KEY` | — | Anthropic API key |
-| `DEFAULT_PROVIDER` | `openai` | LLM provider: `openai` or `anthropic` |
-| `DEFAULT_MODEL` | `gpt-4o` | Default model for OpenAI |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Default model for Anthropic |
-| `MAX_AGENT_ITERATIONS` | `25` | Max ReAct loop iterations per agent |
-| `MAX_TOKENS_PER_TASK` | `100000` | Token budget per task |
-| `AGENT_TIMEOUT_SECONDS` | `300` | Wall-clock timeout per agent run |
-| `API_PORT` | `8080` | API server port |
-| `API_KEY` | — | API authentication key |
-| `MAX_COST_PER_TASK_USD` | `5.00` | Cost ceiling per task |
-
-## API Endpoints
-
-### REST API
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/health` | Health check |
-| `POST` | `/api/tasks` | Create a new task |
-| `GET` | `/api/tasks` | List all tasks |
-| `GET` | `/api/tasks/:id` | Get task details |
-| `DELETE` | `/api/tasks/:id` | Delete a task |
-| `POST` | `/api/tasks/:id/cancel` | Cancel a running task |
-
-### A2A (Agent-to-Agent)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/a2a/.well-known/agent-card.json` | Agent Card discovery |
-| `POST` | `/a2a` | JSON-RPC 2.0 endpoint (SendMessage, GetTask, CancelTask) |
-
-### WebSocket
-
-Connect to `ws://localhost:8080/ws` and send:
-```json
-{"type": "subscribe", "task_id": "<task-id>"}
-```
-
-## Observability
-
-The system uses OpenTelemetry with GenAI semantic conventions:
-
-- **Agent spans**: `agent.run {agent_name}` with task/conversation IDs
-- **LLM spans**: `chat {model}` with token usage and finish reasons
-- **Tool spans**: `execute_tool {tool_name}` with call IDs
-
-Run Jaeger locally for trace visualization:
-
-```bash
-make docker-up
-# Open http://localhost:16686
-```
-
-## Deployment
-
-See **[DEPLOY.md](DEPLOY.md)** for the full step-by-step deployment guide covering:
-
-- Docker Compose deployment (recommended)
-- Bare metal / VM deployment
-- Cloud deployment (AWS, DigitalOcean, Fly.io)
-- TLS setup, security hardening, monitoring
-- How the system interacts with external services (OpenAI, Anthropic, OTLP)
-- Complete external interaction map and task flow diagrams
+Do not include real credentials, private source code, or production data in an
+issue. Rotate any credential that may have been exposed and provide a minimal,
+redacted reproduction.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

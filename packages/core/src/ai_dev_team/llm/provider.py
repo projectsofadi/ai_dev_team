@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from enum import Enum
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class Role(str, Enum):
+class Role(StrEnum):
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
@@ -31,6 +32,7 @@ class ToolResult(BaseModel):
     call_id: str
     output: str
     is_error: bool = False
+    error_code: str | None = None
 
 
 class ChatMessage(BaseModel):
@@ -49,7 +51,10 @@ class ToolDefinition(BaseModel):
     name: str
     description: str
     parameters: dict[str, Any]
-    strict: bool = True
+    # Most project tools intentionally have optional properties. OpenAI strict
+    # schemas require every property to be listed in `required`, so opt out and
+    # enforce the schema again inside ToolRegistry before execution.
+    strict: bool = False
 
 
 class TokenUsage(BaseModel):
@@ -102,7 +107,7 @@ class LLMProvider(ABC):
         ...
 
     @abstractmethod
-    async def stream(
+    def stream(
         self,
         messages: list[ChatMessage],
         tools: list[ToolDefinition] | None = None,
@@ -111,5 +116,4 @@ class LLMProvider(ABC):
         max_tokens: int = 4096,
     ) -> AsyncIterator[StreamChunk]:
         """Streaming completion yielding chunks."""
-        ...
-        yield  # pragma: no cover
+        raise NotImplementedError

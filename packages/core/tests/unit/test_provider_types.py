@@ -56,7 +56,7 @@ class TestToolDefinition:
             parameters={"type": "object", "properties": {}},
         )
         assert defn.name == "my_tool"
-        assert defn.strict is True
+        assert defn.strict is False
 
 
 class TestLLMResponse:

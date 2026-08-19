@@ -4,11 +4,16 @@
 
 import { WebSocketServer, WebSocket } from "ws";
 import { v4 as uuidv4 } from "uuid";
+import { z } from "zod";
 
-interface WSMessage {
-  type: "subscribe" | "unsubscribe" | "ping";
-  task_id?: string;
-}
+const WSMessageSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("subscribe"), task_id: z.string().uuid() }),
+  z.object({ type: z.literal("unsubscribe"), task_id: z.string().uuid() }),
+  z.object({ type: z.literal("ping") }),
+]);
+
+type WSMessage = z.infer<typeof WSMessageSchema>;
+type TaskLookup = (taskId: string) => unknown | undefined;
 
 interface WSBroadcast {
   type: "task_update" | "agent_output" | "tool_call" | "error" | "pong";
@@ -18,22 +23,21 @@ interface WSBroadcast {
 }
 
 const subscriptions = new Map<string, Set<WebSocket>>();
+const clientSubscriptions = new WeakMap<WebSocket, Set<string>>();
+const MAX_SUBSCRIPTIONS_PER_CLIENT = 32;
 
-export function setupWebSocket(wss: WebSocketServer): void {
+export function setupWebSocket(wss: WebSocketServer, lookupTask: TaskLookup): void {
   wss.on("connection", (ws: WebSocket) => {
     const clientId = uuidv4().slice(0, 8);
+    clientSubscriptions.set(ws, new Set());
     console.log(`WebSocket client connected: ${clientId}`);
 
     ws.on("message", (raw: Buffer) => {
       try {
-        const msg: WSMessage = JSON.parse(raw.toString());
-        handleMessage(ws, clientId, msg);
+        const msg = WSMessageSchema.parse(JSON.parse(raw.toString()));
+        handleMessage(ws, clientId, msg, lookupTask);
       } catch {
-        sendToClient(ws, {
-          type: "error",
-          data: { message: "Invalid JSON message" },
-          timestamp: new Date().toISOString(),
-        });
+        sendError(ws, "Invalid WebSocket message");
       }
     });
 
@@ -44,6 +48,7 @@ export function setupWebSocket(wss: WebSocketServer): void {
           subscriptions.delete(taskId);
         }
       }
+      clientSubscriptions.delete(ws);
       console.log(`WebSocket client disconnected: ${clientId}`);
     });
 
@@ -55,23 +60,43 @@ export function setupWebSocket(wss: WebSocketServer): void {
   });
 }
 
-function handleMessage(ws: WebSocket, clientId: string, msg: WSMessage): void {
+function handleMessage(
+  ws: WebSocket,
+  clientId: string,
+  msg: WSMessage,
+  lookupTask: TaskLookup
+): void {
   switch (msg.type) {
-    case "subscribe":
-      if (msg.task_id) {
-        if (!subscriptions.has(msg.task_id)) {
-          subscriptions.set(msg.task_id, new Set());
-        }
-        subscriptions.get(msg.task_id)!.add(ws);
-        console.log(`Client ${clientId} subscribed to task ${msg.task_id}`);
+    case "subscribe": {
+      const task = lookupTask(msg.task_id);
+      if (!task) {
+        sendError(ws, "Task not found", msg.task_id);
+        return;
       }
+      const clientTasks = clientSubscriptions.get(ws)!;
+      if (!clientTasks.has(msg.task_id) && clientTasks.size >= MAX_SUBSCRIPTIONS_PER_CLIENT) {
+        sendError(ws, "Subscription limit reached", msg.task_id);
+        return;
+      }
+      if (!subscriptions.has(msg.task_id)) {
+        subscriptions.set(msg.task_id, new Set());
+      }
+      subscriptions.get(msg.task_id)!.add(ws);
+      clientTasks.add(msg.task_id);
+      console.log(`Client ${clientId} subscribed to task ${msg.task_id}`);
+      broadcastToClient(ws, msg.task_id, task);
       break;
+    }
 
-    case "unsubscribe":
-      if (msg.task_id) {
-        subscriptions.get(msg.task_id)?.delete(ws);
+    case "unsubscribe": {
+      const taskSubscriptions = subscriptions.get(msg.task_id);
+      taskSubscriptions?.delete(ws);
+      if (taskSubscriptions?.size === 0) {
+        subscriptions.delete(msg.task_id);
       }
+      clientSubscriptions.get(ws)?.delete(msg.task_id);
       break;
+    }
 
     case "ping":
       sendToClient(ws, {
@@ -81,6 +106,24 @@ function handleMessage(ws: WebSocket, clientId: string, msg: WSMessage): void {
       });
       break;
   }
+}
+
+function sendError(ws: WebSocket, message: string, taskId?: string): void {
+  sendToClient(ws, {
+    type: "error",
+    task_id: taskId,
+    data: { message },
+    timestamp: new Date().toISOString(),
+  });
+}
+
+function broadcastToClient(ws: WebSocket, taskId: string, data: unknown): void {
+  sendToClient(ws, {
+    type: "task_update",
+    task_id: taskId,
+    data,
+    timestamp: new Date().toISOString(),
+  });
 }
 
 function sendToClient(ws: WebSocket, message: WSBroadcast): void {
@@ -93,15 +136,8 @@ export function broadcastTaskUpdate(taskId: string, data: unknown): void {
   const subs = subscriptions.get(taskId);
   if (!subs) return;
 
-  const message: WSBroadcast = {
-    type: "task_update",
-    task_id: taskId,
-    data,
-    timestamp: new Date().toISOString(),
-  };
-
   for (const ws of subs) {
-    sendToClient(ws, message);
+    broadcastToClient(ws, taskId, data);
   }
 }
 

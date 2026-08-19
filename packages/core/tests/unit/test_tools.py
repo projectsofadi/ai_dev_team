@@ -7,7 +7,6 @@ import tempfile
 
 import pytest
 
-from ai_dev_team.tools.base import ToolResult
 from ai_dev_team.tools.filesystem import FilesystemTool
 from ai_dev_team.tools.search import SearchTool
 from ai_dev_team.tools.shell import ShellTool
@@ -76,6 +75,24 @@ class TestFilesystemTool:
         result = await fs_tool.execute(action="read", path="../../etc/passwd")
         assert not result.ok
         assert "escapes" in (result.error or "").lower()
+
+    async def test_sibling_with_shared_prefix_blocked(self, tmp_dir: str):
+        sibling = f"{tmp_dir}-outside"
+        os.makedirs(sibling)
+        try:
+            outside_file = os.path.join(sibling, "secret.txt")
+            with open(outside_file, "w") as f:
+                f.write("outside")
+
+            tool = FilesystemTool(root_dir=tmp_dir)
+            result = await tool.execute(action="read", path=outside_file)
+
+            assert not result.ok
+            assert "escapes" in (result.error or "").lower()
+        finally:
+            if os.path.exists(outside_file):
+                os.unlink(outside_file)
+            os.rmdir(sibling)
 
     async def test_to_definition(self, fs_tool: FilesystemTool):
         defn = fs_tool.to_definition()
@@ -159,3 +176,50 @@ class TestShellTool:
         result = await shell_tool.execute(command='echo "unterminated')
         assert not result.ok
         assert result.error
+
+    async def test_working_directory_escape_blocked(self, shell_tool: ShellTool, tmp_dir: str):
+        result = await shell_tool.execute(command="pwd", working_dir=os.path.dirname(tmp_dir))
+        assert not result.ok
+        assert "project root" in (result.error or "")
+
+    async def test_subprocess_environment_excludes_provider_secrets(
+        self,
+        shell_tool: ShellTool,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-that-must-not-reach-tools")
+        result = await shell_tool.execute(command="env")
+        assert result.ok
+        assert "sk-secret" not in (result.data or "")
+        assert "OPENAI_API_KEY" not in (result.data or "")
+
+
+class TestSearchTool:
+    async def test_search_path_traversal_blocked(self, tmp_dir: str):
+        tool = SearchTool(root_dir=tmp_dir)
+        result = await tool.execute(pattern="secret", path="..")
+        assert not result.ok
+        assert "project root" in (result.error or "")
+
+    async def test_absolute_search_path_outside_root_blocked(self, tmp_dir: str):
+        tool = SearchTool(root_dir=tmp_dir)
+        result = await tool.execute(pattern="secret", path="/etc")
+        assert not result.ok
+        assert "project root" in (result.error or "")
+
+    async def test_option_like_pattern_cannot_execute_ripgrep_preprocessor(
+        self,
+        tmp_dir: str,
+    ):
+        preprocessor = os.path.join(tmp_dir, "evil-preprocessor")
+        sentinel = os.path.join(tmp_dir, "executed.txt")
+        with open(preprocessor, "w") as f:
+            f.write(f'#!/bin/sh\nprintf executed > "{sentinel}"\ncat\n')
+        os.chmod(preprocessor, 0o700)
+        with open(os.path.join(tmp_dir, "source.txt"), "w") as f:
+            f.write("ordinary content")
+
+        tool = SearchTool(root_dir=tmp_dir)
+        await tool.execute(pattern=f"--pre={preprocessor}")
+
+        assert not os.path.exists(sentinel)

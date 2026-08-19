@@ -26,6 +26,7 @@ class EchoTool(BaseTool):
             "type": "object",
             "properties": {"text": {"type": "string"}},
             "required": ["text"],
+            "additionalProperties": False,
         }
 
     @property
@@ -51,6 +52,7 @@ class SlowTool(BaseTool):
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         import asyncio
+
         await asyncio.sleep(100)
         return ToolResult(ok=True)
 
@@ -70,6 +72,16 @@ class FailTool(BaseTool):
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         raise RuntimeError("boom")
+
+
+class ApprovalTool(EchoTool):
+    @property
+    def name(self) -> str:
+        return "approval"
+
+    @property
+    def requires_approval(self) -> bool:
+        return True
 
 
 @pytest.fixture
@@ -103,6 +115,45 @@ class TestToolRegistry:
         assert result.is_error
         assert "Unknown tool" in result.output
 
+    async def test_rejects_invalid_arguments_before_execution(self, registry: ToolRegistry):
+        call = ToolCall(id="bad", name="echo", arguments={"text": 123})
+        result = await registry.execute(call)
+        assert result.is_error
+        assert "Invalid tool arguments" in result.output
+
+    async def test_blocks_secret_bearing_tool_output(self, registry: ToolRegistry):
+        call = ToolCall(
+            id="secret",
+            name="echo",
+            arguments={"text": "sk-abc123def456ghi789jkl012mno345"},
+        )
+        result = await registry.execute(call)
+        assert result.is_error
+        assert "Tool output blocked" in result.output
+        assert "sk-abc" not in result.output
+
+    async def test_configured_approval_fails_closed_without_callback(self):
+        registry = ToolRegistry(
+            [ApprovalTool()],
+            enforce_configured_approvals=True,
+        )
+        call = ToolCall(id="approval", name="approval", arguments={"text": "hello"})
+        result = await registry.execute(call)
+        assert result.is_error
+        assert "Approval required" in result.output
+        assert result.error_code == "approval_denied"
+
+    async def test_configured_approval_callback_can_allow_call(self):
+        registry = ToolRegistry(
+            [ApprovalTool()],
+            enforce_configured_approvals=True,
+            approval_callback=lambda _tool, _call: True,
+        )
+        call = ToolCall(id="approval", name="approval", arguments={"text": "hello"})
+        result = await registry.execute(call)
+        assert not result.is_error
+        assert result.output == "hello"
+
     async def test_execute_timeout(self, registry: ToolRegistry):
         call = ToolCall(id="c3", name="slow", arguments={})
         result = await registry.execute(call, timeout=0.1)
@@ -113,7 +164,8 @@ class TestToolRegistry:
         call = ToolCall(id="c4", name="fail", arguments={})
         result = await registry.execute(call)
         assert result.is_error
-        assert "boom" in result.output
+        assert "RuntimeError" in result.output
+        assert "boom" not in result.output
 
     async def test_execute_batch(self, registry: ToolRegistry):
         calls = [

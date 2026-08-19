@@ -2,7 +2,8 @@ FROM node:22-slim AS build
 
 WORKDIR /app/packages/server
 COPY packages/server/package.json packages/server/tsconfig.json ./
-RUN npm install
+COPY packages/server/package-lock.json ./
+RUN npm ci
 
 COPY packages/server/src ./src
 RUN npx tsc
@@ -25,7 +26,13 @@ COPY --from=build /app/packages/server/package.json /app/packages/server/package
 
 ENV PATH="/app/.venv/bin:$PATH"
 ENV NODE_ENV=production
+ENV AGENT_WORKSPACE=/workspace
+ENV PYTHON_EXECUTABLE=/app/.venv/bin/python
+
+RUN mkdir -p /workspace /app/data \
+    && chown -R node:node /workspace /app/data
 
 WORKDIR /app/packages/server
+USER node
 EXPOSE 8080
 CMD ["node", "dist/index.js"]

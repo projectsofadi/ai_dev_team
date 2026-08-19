@@ -54,9 +54,12 @@ class ReviewerAgent(BaseAgent):
         llm: LLMProvider,
         working_dir: str | None = None,
     ):
-        tools = ToolRegistry([
-            FilesystemTool(root_dir=working_dir),
-            GitTool(repo_dir=working_dir),
-            SearchTool(root_dir=working_dir),
-        ])
+        tools = ToolRegistry(
+            [
+                FilesystemTool(root_dir=working_dir),
+                GitTool(repo_dir=working_dir),
+                SearchTool(root_dir=working_dir),
+            ],
+            enforce_configured_approvals=True,
+        )
         super().__init__(llm=llm, tools=tools)

@@ -7,7 +7,7 @@ import sys
 
 import structlog
 
-from ai_dev_team.config import get_settings
+from ai_dev_team.runtime import build_orchestrator
 
 
 def main() -> None:
@@ -27,37 +27,14 @@ def main() -> None:
         sys.exit(1)
 
     task_description = " ".join(sys.argv[1:])
-    asyncio.run(_run_task(task_description))
+    succeeded = asyncio.run(_run_task(task_description))
+    raise SystemExit(0 if succeeded else 1)
 
 
-async def _run_task(description: str) -> None:
-    settings = get_settings()
-
-    if settings.llm.default_provider == "openai":
-        from ai_dev_team.llm.openai import OpenAIProvider
-        llm = OpenAIProvider()
-    else:
-        from ai_dev_team.llm.anthropic import AnthropicProvider
-        llm = AnthropicProvider()
-
-    from ai_dev_team.agents.coder import CoderAgent
-    from ai_dev_team.agents.orchestrator import OrchestratorAgent
-    from ai_dev_team.agents.planner import PlannerAgent
-    from ai_dev_team.agents.reviewer import ReviewerAgent
-    from ai_dev_team.agents.tester import TesterAgent
+async def _run_task(description: str) -> bool:
     from ai_dev_team.orchestration.state import Task
 
-    planner = PlannerAgent(llm=llm)
-    coder = CoderAgent(llm=llm)
-    reviewer = ReviewerAgent(llm=llm)
-    tester = TesterAgent(llm=llm)
-    orchestrator = OrchestratorAgent(
-        llm=llm,
-        planner=planner,
-        coder=coder,
-        reviewer=reviewer,
-        tester=tester,
-    )
+    orchestrator = build_orchestrator()
 
     task = Task(description=description)
     print(f"\nTask ID: {task.id}")
@@ -71,6 +48,7 @@ async def _run_task(description: str) -> None:
     if result.error:
         print(f"\nError: {result.error}")
     print(f"\nElapsed: {result.elapsed_seconds:.1f}s")
+    return result.state.value == "completed"
 
 
 if __name__ == "__main__":

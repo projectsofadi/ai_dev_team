@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import openai
 
@@ -35,32 +36,38 @@ class OpenAIProvider(LLMProvider):
         result: list[dict[str, Any]] = []
         for msg in messages:
             if msg.role == Role.TOOL and msg.tool_result:
-                result.append({
-                    "role": "tool",
-                    "tool_call_id": msg.tool_result.call_id,
-                    "content": msg.tool_result.output,
-                })
+                result.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": msg.tool_result.call_id,
+                        "content": msg.tool_result.output,
+                    }
+                )
             elif msg.role == Role.ASSISTANT and msg.tool_calls:
-                result.append({
-                    "role": "assistant",
-                    "content": msg.content or None,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": json.dumps(tc.arguments),
-                            },
-                        }
-                        for tc in msg.tool_calls
-                    ],
-                })
+                result.append(
+                    {
+                        "role": "assistant",
+                        "content": msg.content or None,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": json.dumps(tc.arguments),
+                                },
+                            }
+                            for tc in msg.tool_calls
+                        ],
+                    }
+                )
             else:
-                result.append({
-                    "role": msg.role.value,
-                    "content": msg.content,
-                })
+                result.append(
+                    {
+                        "role": msg.role.value,
+                        "content": msg.content,
+                    }
+                )
         return result
 
     def _build_tools(self, tools: list[ToolDefinition]) -> list[dict[str, Any]]:
@@ -87,11 +94,13 @@ class OpenAIProvider(LLMProvider):
                     args = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
                     args = {"raw": tc.function.arguments}
-                tool_calls.append(ToolCall(
-                    id=tc.id,
-                    name=tc.function.name,
-                    arguments=args,
-                ))
+                tool_calls.append(
+                    ToolCall(
+                        id=tc.id,
+                        name=tc.function.name,
+                        arguments=args,
+                    )
+                )
 
         return LLMResponse(
             message=ChatMessage(
@@ -181,9 +190,7 @@ class OpenAIProvider(LLMProvider):
                         if tc_delta.function.name:
                             accumulated_tool_calls[idx]["name"] = tc_delta.function.name
                         if tc_delta.function.arguments:
-                            accumulated_tool_calls[idx]["arguments"] += (
-                                tc_delta.function.arguments
-                            )
+                            accumulated_tool_calls[idx]["arguments"] += tc_delta.function.arguments
 
             completed_calls: list[ToolCall] = []
             if finish == "tool_calls":
@@ -192,11 +199,13 @@ class OpenAIProvider(LLMProvider):
                         args = json.loads(tc_data["arguments"])
                     except json.JSONDecodeError:
                         args = {"raw": tc_data["arguments"]}
-                    completed_calls.append(ToolCall(
-                        id=tc_data["id"],
-                        name=tc_data["name"],
-                        arguments=args,
-                    ))
+                    completed_calls.append(
+                        ToolCall(
+                            id=tc_data["id"],
+                            name=tc_data["name"],
+                            arguments=args,
+                        )
+                    )
 
             yield StreamChunk(
                 delta_content=delta.content or "",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ai_dev_team.llm.provider import ChatMessage, Role
-from ai_dev_team.memory.working import WorkingMemory, estimate_tokens, message_tokens
+from ai_dev_team.memory.working import WorkingMemory, estimate_tokens
 
 
 class TestEstimateTokens:

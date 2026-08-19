@@ -56,11 +56,13 @@ class FilesystemTool(BaseTool):
     def _resolve_safe(self, path: str) -> Path | None:
         """Resolve path ensuring it stays within root."""
         resolved = (self._root / path).resolve()
-        if not str(resolved).startswith(str(self._root)):
+        try:
+            resolved.relative_to(self._root)
+        except ValueError:
             return None
         return resolved
 
-    async def execute(
+    async def execute(  # type: ignore[override]
         self, action: str, path: str, content: str | None = None, **kwargs: Any
     ) -> ToolResult:
         target = self._resolve_safe(path)
@@ -103,6 +105,7 @@ class FilesystemTool(BaseTool):
                     return ToolResult(ok=False, error=f"Path not found: {path}")
                 if target.is_dir():
                     import shutil
+
                     shutil.rmtree(target)
                 else:
                     target.unlink()

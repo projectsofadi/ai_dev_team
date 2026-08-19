@@ -4,47 +4,29 @@ services:
       context: .
       dockerfile: packages/server/Dockerfile
     ports:
-      - "${API_PORT:-8080}:8080"
+      - "127.0.0.1:${API_PORT:-8080}:8080"
     env_file:
       - .env
+    environment:
+      API_HOST: 0.0.0.0
+      AGENT_WORKSPACE: /workspace
+      PYTHON_EXECUTABLE: /app/.venv/bin/python
     volumes:
       - app-data:/app/data
-    depends_on:
-      - jaeger
+      - agent-workspace:/workspace
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-
-  jaeger:
-    image: jaegertracing/all-in-one:latest
-    ports:
-      - "16686:16686"
-      - "4317:4317"
-      - "4318:4318"
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
-    restart: unless-stopped
-    volumes:
-      - jaeger-data:/badger
-
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./certs:/etc/nginx/certs:ro
-    depends_on:
-      - api
-    restart: unless-stopped
-    profiles:
-      - production
-
 volumes:
   app-data:
-  jaeger-data:
+  agent-workspace:

@@ -77,12 +77,14 @@ class LongTermMemory:
         distances = results.get("distances", [[]])[0]
 
         for i in range(len(ids)):
-            documents.append({
-                "id": ids[i],
-                "text": texts[i] if texts else "",
-                "metadata": metadatas[i] if metadatas else {},
-                "distance": distances[i] if distances else 0.0,
-            })
+            documents.append(
+                {
+                    "id": ids[i],
+                    "text": texts[i] if texts else "",
+                    "metadata": metadatas[i] if metadatas else {},
+                    "distance": distances[i] if distances else 0.0,
+                }
+            )
 
         return documents
 
@@ -95,4 +97,4 @@ class LongTermMemory:
     def count(self) -> int:
         """Number of documents stored."""
         self._ensure_initialized()
-        return self._collection.count()
+        return int(self._collection.count())

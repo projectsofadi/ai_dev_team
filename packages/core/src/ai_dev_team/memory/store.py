@@ -68,7 +68,8 @@ class StateStore:
             await db.execute(
                 """
                 INSERT OR REPLACE INTO tasks
-                    (id, description, state, plan_json, result, error, metadata_json, created_at, updated_at)
+                    (id, description, state, plan_json, result, error,
+                     metadata_json, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
@@ -94,9 +95,7 @@ class StateStore:
                     return None
                 return dict(row)
 
-    async def list_tasks(
-        self, limit: int = 50, state: str | None = None
-    ) -> list[dict[str, Any]]:
+    async def list_tasks(self, limit: int = 50, state: str | None = None) -> list[dict[str, Any]]:
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             if state:

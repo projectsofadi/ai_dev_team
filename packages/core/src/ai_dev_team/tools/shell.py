@@ -17,6 +17,8 @@ import asyncio
 import contextlib
 import os
 import shlex
+import signal
+from pathlib import Path
 from typing import Any
 
 from ai_dev_team.tools.base import BaseTool, ToolResult
@@ -26,21 +28,75 @@ from ai_dev_team.tools.base import BaseTool, ToolResult
 # (``curl``/``wget``/``nc``), privilege-escalation (``sudo``), and shell-reentry
 # (``bash``/``sh``) commands are intentionally excluded. File mutations should go
 # through ``FilesystemTool``, which is path-traversal guarded.
-DEFAULT_ALLOWED_COMMANDS: frozenset[str] = frozenset({
-    # inspection
-    "ls", "cat", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "grep",
-    "egrep", "fgrep", "rg", "find", "diff", "stat", "file", "which", "env",
-    "date", "echo", "printf", "pwd", "basename", "dirname", "realpath", "tree",
-    "true", "false", "test", "sleep",
-    # python
-    "python", "python3", "pip", "pip3", "uv", "pytest", "ruff", "mypy",
-    "black", "isort", "flake8",
-    # node / typescript
-    "node", "npm", "npx", "pnpm", "yarn", "tsc", "eslint", "prettier",
-    "vitest", "jest",
-    # build / other languages / VCS
-    "make", "go", "cargo", "rustc", "java", "javac", "mvn", "gradle", "git",
-})
+DEFAULT_ALLOWED_COMMANDS: frozenset[str] = frozenset(
+    {
+        # inspection
+        "ls",
+        "cat",
+        "head",
+        "tail",
+        "wc",
+        "sort",
+        "uniq",
+        "cut",
+        "tr",
+        "grep",
+        "egrep",
+        "fgrep",
+        "rg",
+        "find",
+        "diff",
+        "stat",
+        "file",
+        "which",
+        "env",
+        "date",
+        "echo",
+        "printf",
+        "pwd",
+        "basename",
+        "dirname",
+        "realpath",
+        "tree",
+        "true",
+        "false",
+        "test",
+        "sleep",
+        # python
+        "python",
+        "python3",
+        "pip",
+        "pip3",
+        "uv",
+        "pytest",
+        "ruff",
+        "mypy",
+        "black",
+        "isort",
+        "flake8",
+        # node / typescript
+        "node",
+        "npm",
+        "npx",
+        "pnpm",
+        "yarn",
+        "tsc",
+        "eslint",
+        "prettier",
+        "vitest",
+        "jest",
+        # build / other languages / VCS
+        "make",
+        "go",
+        "cargo",
+        "rustc",
+        "java",
+        "javac",
+        "mvn",
+        "gradle",
+        "git",
+    }
+)
 
 # Shell control operators that signal an attempt to chain, substitute, background,
 # or redirect additional commands. Rejected up-front with a clear error;
@@ -48,18 +104,25 @@ DEFAULT_ALLOWED_COMMANDS: frozenset[str] = frozenset({
 # silently passing them through as literal arguments.
 _SHELL_OPERATORS: tuple[str, ...] = (";", "|", "&", "`", "$(", ">", "<", "\n", "\r")
 
+_SAFE_ENV_KEYS: tuple[str, ...] = (
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "PYTHONPATH",
+    "TMPDIR",
+    "VIRTUAL_ENV",
+)
+
 
 class ShellTool(BaseTool):
     """Execute a single allow-listed command with timeout and output capture."""
 
     def __init__(self, working_dir: str | None = None, allowed_commands: list[str] | None = None):
-        self._working_dir = working_dir or os.getcwd()
+        self._working_dir = Path(working_dir or os.getcwd()).resolve()
         # ``None`` -> safe default allow-list; an explicit list (even empty) is
         # honoured verbatim, so ``allowed_commands=[]`` denies everything.
         self._allowed_commands: frozenset[str] = (
-            DEFAULT_ALLOWED_COMMANDS
-            if allowed_commands is None
-            else frozenset(allowed_commands)
+            DEFAULT_ALLOWED_COMMANDS if allowed_commands is None else frozenset(allowed_commands)
         )
 
     @property
@@ -99,14 +162,45 @@ class ShellTool(BaseTool):
     def requires_approval(self) -> bool:
         return True
 
-    async def execute(
+    def _resolve_working_dir(self, requested: str | None) -> Path | None:
+        candidate = Path(requested) if requested else self._working_dir
+        if not candidate.is_absolute():
+            candidate = self._working_dir / candidate
+        candidate = candidate.resolve()
+        try:
+            candidate.relative_to(self._working_dir)
+        except ValueError:
+            return None
+        return candidate if candidate.is_dir() else None
+
+    @staticmethod
+    def _subprocess_env() -> dict[str, str]:
+        return {key: os.environ[key] for key in _SAFE_ENV_KEYS if key in os.environ}
+
+    @staticmethod
+    async def _kill_process_group(proc: asyncio.subprocess.Process | None) -> None:
+        if proc is None or proc.returncode is not None:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError):
+            await proc.wait()
+
+    async def execute(  # type: ignore[override]
         self,
         command: str,
         working_dir: str | None = None,
         timeout: float = 30.0,
         **kwargs: Any,
     ) -> ToolResult:
-        cwd = working_dir or self._working_dir
+        cwd = self._resolve_working_dir(working_dir)
+        if cwd is None:
+            return ToolResult(
+                ok=False,
+                error="Working directory must exist within the configured project root",
+            )
+        if timeout <= 0 or timeout > 300:
+            return ToolResult(ok=False, error="Timeout must be between 0 and 300 seconds")
 
         # Layer 1: reject shell control operators (chaining / substitution /
         # redirection). Fail loud rather than run one command and silently drop
@@ -135,8 +229,7 @@ class ShellTool(BaseTool):
             return ToolResult(
                 ok=False,
                 error=(
-                    f"Command '{program}' not in allowed commands: "
-                    f"{sorted(self._allowed_commands)}"
+                    f"Command '{program}' not in allowed commands: {sorted(self._allowed_commands)}"
                 ),
             )
 
@@ -148,6 +241,8 @@ class ShellTool(BaseTool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                env=self._subprocess_env(),
+                start_new_session=True,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
@@ -172,10 +267,11 @@ class ShellTool(BaseTool):
             )
 
         except TimeoutError:
-            if proc is not None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
+            await self._kill_process_group(proc)
             return ToolResult(ok=False, error=f"Command timed out after {timeout}s")
+        except asyncio.CancelledError:
+            await self._kill_process_group(proc)
+            raise
         except FileNotFoundError:
             return ToolResult(ok=False, error=f"Command not found: {argv[0]}")
         except Exception as exc:

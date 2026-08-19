@@ -126,6 +126,16 @@ class TestBudgetTracker:
         tracker.record_usage("gpt-4o", input_tokens=10, output_tokens=10)
         assert tracker.iterations_exceeded
 
+    def test_exact_limit_blocks_another_provider_call(self):
+        tracker = BudgetTracker(max_tokens=100, max_iterations=2)
+        tracker.record_usage("gpt-4o", input_tokens=40, output_tokens=60)
+        assert tracker.check() is None
+        assert "Token budget exhausted" in (tracker.check_before_call() or "")
+
+        iteration_tracker = BudgetTracker(max_tokens=1_000, max_iterations=1)
+        iteration_tracker.record_usage("gpt-4o", input_tokens=1, output_tokens=1)
+        assert "Iteration limit reached" in (iteration_tracker.check_before_call() or "")
+
     def test_summary(self):
         tracker = BudgetTracker()
         tracker.record_usage("gpt-4o", input_tokens=100, output_tokens=50)

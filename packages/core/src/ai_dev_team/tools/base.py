@@ -54,7 +54,12 @@ class BaseTool(ABC):
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> ToolResult:
-        """Run the tool with validated arguments."""
+        """Run the tool with validated arguments.
+
+        Concrete tools expose schema-specific required keyword arguments. Their
+        overrides therefore carry a narrow mypy suppression while the registry
+        remains dynamically schema-driven.
+        """
         ...
 
     def to_definition(self) -> ToolDefinition:

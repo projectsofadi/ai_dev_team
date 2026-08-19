@@ -87,7 +87,7 @@ def validate_tool_args(
         prop_schema = properties[key]
         expected_type = prop_schema.get("type")
         if expected_type:
-            type_map = {
+            type_map: dict[str, type[Any] | tuple[type[Any], ...]] = {
                 "string": str,
                 "integer": int,
                 "number": (int, float),
@@ -101,10 +101,9 @@ def validate_tool_args(
                     f"Argument '{key}' should be {expected_type}, got {type(value).__name__}"
                 )
 
-        if expected_type == "string" and "enum" in prop_schema:
-            if value not in prop_schema["enum"]:
-                result.add_violation(
-                    f"Argument '{key}' must be one of {prop_schema['enum']}, got '{value}'"
-                )
+        if expected_type == "string" and "enum" in prop_schema and value not in prop_schema["enum"]:
+            result.add_violation(
+                f"Argument '{key}' must be one of {prop_schema['enum']}, got '{value}'"
+            )
 
     return result

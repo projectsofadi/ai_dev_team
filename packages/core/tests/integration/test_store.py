@@ -45,17 +45,19 @@ class TestStateStore:
     async def test_list_tasks(self, store: StateStore):
         now = time.time()
         for i in range(5):
-            await store.save_task({
-                "id": f"t{i}",
-                "description": f"Task {i}",
-                "state": "submitted" if i % 2 == 0 else "completed",
-                "plan": None,
-                "result": None,
-                "error": None,
-                "metadata": {},
-                "created_at": now,
-                "updated_at": now + i,
-            })
+            await store.save_task(
+                {
+                    "id": f"t{i}",
+                    "description": f"Task {i}",
+                    "state": "submitted" if i % 2 == 0 else "completed",
+                    "plan": None,
+                    "result": None,
+                    "error": None,
+                    "metadata": {},
+                    "created_at": now,
+                    "updated_at": now + i,
+                }
+            )
 
         all_tasks = await store.list_tasks()
         assert len(all_tasks) == 5
@@ -64,39 +66,45 @@ class TestStateStore:
         assert len(submitted) == 3
 
     async def test_save_event(self, store: StateStore):
-        await store.save_task({
-            "id": "t1",
-            "description": "Test",
-            "state": "submitted",
-            "plan": None,
-            "result": None,
-            "error": None,
-            "metadata": {},
-            "created_at": time.time(),
-            "updated_at": time.time(),
-        })
+        await store.save_task(
+            {
+                "id": "t1",
+                "description": "Test",
+                "state": "submitted",
+                "plan": None,
+                "result": None,
+                "error": None,
+                "metadata": {},
+                "created_at": time.time(),
+                "updated_at": time.time(),
+            }
+        )
 
-        await store.save_event({
-            "task_id": "t1",
-            "from_state": "submitted",
-            "to_state": "planning",
-            "agent": "planner",
-            "detail": "",
-            "timestamp": time.time(),
-        })
+        await store.save_event(
+            {
+                "task_id": "t1",
+                "from_state": "submitted",
+                "to_state": "planning",
+                "agent": "planner",
+                "detail": "",
+                "timestamp": time.time(),
+            }
+        )
 
         events = await store.get_task_events("t1")
         assert len(events) == 1
         assert events[0]["to_state"] == "planning"
 
     async def test_save_agent_log(self, store: StateStore):
-        await store.save_agent_log({
-            "task_id": "t1",
-            "agent_name": "coder",
-            "iteration": 1,
-            "input_tokens": 100,
-            "output_tokens": 50,
-            "tool_calls": [{"name": "shell", "args": {"cmd": "echo hi"}}],
-            "output_text": "Done",
-            "timestamp": time.time(),
-        })
+        await store.save_agent_log(
+            {
+                "task_id": "t1",
+                "agent_name": "coder",
+                "iteration": 1,
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "tool_calls": [{"name": "shell", "args": {"cmd": "echo hi"}}],
+                "output_text": "Done",
+                "timestamp": time.time(),
+            }
+        )

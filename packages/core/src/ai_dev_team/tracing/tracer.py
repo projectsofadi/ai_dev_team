@@ -31,10 +31,12 @@ def init_tracing(
 
     settings = get_settings()
 
-    resource = Resource.create({
-        "service.name": settings.observability.otel_service_name,
-        "service.version": "0.1.0",
-    })
+    resource = Resource.create(
+        {
+            "service.name": settings.observability.otel_service_name,
+            "service.version": "0.1.0",
+        }
+    )
 
     provider = TracerProvider(resource=resource)
 

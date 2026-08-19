@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import { runCommand } from "./commands/run.js";
+import { ReportedCliError, runCommand } from "./commands/run.js";
 import { statusCommand } from "./commands/status.js";
 import { configCommand } from "./commands/config.js";
 
@@ -16,4 +16,9 @@ program.addCommand(runCommand);
 program.addCommand(statusCommand);
 program.addCommand(configCommand);
 
-program.parse();
+program.parseAsync().catch((error: unknown) => {
+  if (error instanceof Error && !(error instanceof ReportedCliError)) {
+    console.error(error.message);
+  }
+  process.exitCode = 1;
+});

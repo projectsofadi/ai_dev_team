@@ -5,22 +5,32 @@ import { WebSocket } from "ws";
 
 const DEFAULT_API = "http://localhost:8080";
 
+export class ReportedCliError extends Error {
+  override readonly name = "ReportedCliError";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export const runCommand = new Command("run")
   .description("Submit a development task to the AI dev team")
   .argument("<description>", "Task description")
   .option("-s, --server <url>", "API server URL", DEFAULT_API)
-  .option("-k, --api-key <key>", "API key for authentication")
+  .option("-k, --api-key <key>", "API key (prefer AI_DEV_TEAM_API_KEY env)")
   .option("-w, --watch", "Watch task progress via WebSocket", false)
   .action(async (description: string, opts) => {
     const spinner = ora("Submitting task...").start();
+    const apiKey = opts.apiKey || process.env.AI_DEV_TEAM_API_KEY;
 
     try {
+      if (!apiKey) {
+        throw new Error("Set AI_DEV_TEAM_API_KEY before using the CLI");
+      }
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
       };
-      if (opts.apiKey) {
-        headers["Authorization"] = `Bearer ${opts.apiKey}`;
-      }
 
       const res = await fetch(`${opts.server}/api/tasks`, {
         method: "POST",
@@ -30,8 +40,7 @@ export const runCommand = new Command("run")
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: res.statusText }));
-        spinner.fail(chalk.red(`Failed: ${(err as Record<string, string>).error}`));
-        process.exit(1);
+        throw new Error((err as Record<string, string>).error || res.statusText);
       }
 
       const task = (await res.json()) as Record<string, string>;
@@ -41,20 +50,40 @@ export const runCommand = new Command("run")
       console.log(chalk.dim(`  State: ${task.state}`));
 
       if (opts.watch) {
-        await watchTask(opts.server, task.id);
+        await watchTask(opts.server, task.id, apiKey);
       }
     } catch (err) {
-      spinner.fail(chalk.red(`Error: ${err}`));
-      process.exit(1);
+      const message = errorMessage(err);
+      spinner.fail(chalk.red(`Error: ${message}`));
+      throw new ReportedCliError(message, { cause: err });
     }
   });
 
-async function watchTask(serverUrl: string, taskId: string): Promise<void> {
+export function terminalTaskError(state: string, detail?: string): Error | null {
+  if (state === "completed") return null;
+  if (state === "failed" || state === "cancelled") {
+    return new Error(detail || `Task ended in state: ${state}`);
+  }
+  return null;
+}
+
+async function watchTask(
+  serverUrl: string,
+  taskId: string,
+  apiKey: string
+): Promise<void> {
   const wsUrl = serverUrl.replace(/^http/, "ws") + "/ws";
   console.log(chalk.dim(`\nConnecting to ${wsUrl}...`));
 
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl);
+    let terminalUpdateReceived = false;
+    const ws = new WebSocket(wsUrl, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("Timed out waiting for a terminal task update"));
+    }, 10 * 60 * 1000);
 
     ws.on("open", () => {
       console.log(chalk.green("Connected. Watching task progress...\n"));
@@ -69,13 +98,13 @@ async function watchTask(serverUrl: string, taskId: string): Promise<void> {
           case "task_update": {
             const data = msg.data as Record<string, string>;
             console.log(chalk.blue(`[${msg.timestamp}] State: ${data.state}`));
-            if (
-              data.state === "completed" ||
-              data.state === "failed" ||
-              data.state === "cancelled"
-            ) {
+            if (["completed", "failed", "cancelled"].includes(data.state)) {
+              terminalUpdateReceived = true;
+              clearTimeout(timeout);
               ws.close();
-              resolve();
+              const terminalError = terminalTaskError(data.state, data.error);
+              if (terminalError) reject(terminalError);
+              else resolve();
             }
             break;
           }
@@ -86,7 +115,9 @@ async function watchTask(serverUrl: string, taskId: string): Promise<void> {
           }
           case "error": {
             const data = msg.data as Record<string, string>;
-            console.log(chalk.red(`Error: ${data.message}`));
+            clearTimeout(timeout);
+            ws.close();
+            reject(new Error(data.message || "WebSocket task subscription failed"));
             break;
           }
         }
@@ -96,12 +127,15 @@ async function watchTask(serverUrl: string, taskId: string): Promise<void> {
     });
 
     ws.on("close", () => {
+      clearTimeout(timeout);
       console.log(chalk.dim("\nDisconnected."));
-      resolve();
+      if (!terminalUpdateReceived) {
+        reject(new Error("WebSocket closed before a terminal task update"));
+      }
     });
 
     ws.on("error", (err: Error) => {
-      console.error(chalk.red(`WebSocket error: ${err.message}`));
+      clearTimeout(timeout);
       reject(err);
     });
   });

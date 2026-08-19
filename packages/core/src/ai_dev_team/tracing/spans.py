@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Generator
 
 from opentelemetry import trace
 from opentelemetry.trace import Span, StatusCode
 
-from ai_dev_team.llm.provider import LLMResponse, TokenUsage
+from ai_dev_team.llm.provider import LLMResponse
 from ai_dev_team.tracing.tracer import get_tracer
 
 GEN_AI_OPERATION_NAME = "gen_ai.operation.name"

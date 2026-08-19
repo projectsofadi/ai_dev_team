@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import structlog
 
 from ai_dev_team.agents.base import AgentResult, BaseAgent
@@ -65,22 +67,30 @@ class OrchestrationEngine:
                     task.transition(TaskState.COMPLETED, agent="orchestrator")
                     task.result = self._build_summary(task)
                 else:
-                    task.transition(TaskState.FAILED, agent="tester", detail=test_result.error or "")
+                    task.transition(
+                        TaskState.FAILED,
+                        agent="tester",
+                        detail=test_result.error or "",
+                    )
                     task.error = test_result.error
             else:
-                task.transition(TaskState.FAILED, agent="orchestrator", detail="Plan execution had failures")
+                task.transition(
+                    TaskState.FAILED,
+                    agent="orchestrator",
+                    detail="Plan execution had failures",
+                )
                 task.error = "One or more plan steps failed"
 
         except ValueError as exc:
-            logger.error("engine_state_error", task_id=task.id, error=str(exc))
-            task.error = str(exc)
+            logger.error("engine_state_error", task_id=task.id, error_type=type(exc).__name__)
+            with contextlib.suppress(ValueError):
+                task.transition(TaskState.FAILED, agent="orchestrator", detail="State error")
+            task.error = "Task failed because its state or plan was invalid"
         except Exception as exc:
-            logger.error("engine_error", task_id=task.id, error=str(exc))
-            try:
-                task.transition(TaskState.FAILED, agent="orchestrator", detail=str(exc))
-            except ValueError:
-                pass
-            task.error = f"{type(exc).__name__}: {exc}"
+            logger.error("engine_error", task_id=task.id, error_type=type(exc).__name__)
+            with contextlib.suppress(ValueError):
+                task.transition(TaskState.FAILED, agent="orchestrator", detail="Execution error")
+            task.error = f"{type(exc).__name__}: task execution failed"
 
         logger.info(
             "engine_complete",
@@ -91,23 +101,14 @@ class OrchestrationEngine:
         return task
 
     async def _plan(self, task: Task) -> ExecutionPlan:
-        prompt = (
-            f"Create a detailed execution plan for this task:\n\n{task.description}\n\n"
-            "Return your plan as a structured response with:\n"
-            "- title: short title for the plan\n"
-            "- objective: what we're trying to achieve\n"
-            "- steps: ordered list where each step has:\n"
-            "  - title, description, agent (coder/reviewer/tester)\n"
-            "  - acceptance_criteria: list of criteria\n"
-            "  - files_to_create / files_to_modify\n"
-            "  - depends_on: list of step IDs this depends on"
-        )
-        result = await self.planner.run(prompt)
-        return ExecutionPlan(
-            title=f"Plan for: {task.description[:80]}",
-            objective=task.description,
-            steps=[],  # planner will populate via structured output in real usage
-        )
+        create_plan = getattr(self.planner, "create_plan", None)
+        if not callable(create_plan):
+            raise TypeError("Planner must implement create_plan(task_description)")
+
+        plan = await create_plan(task.description)
+        if not isinstance(plan, ExecutionPlan) or not plan.steps:
+            raise ValueError("Planner returned an empty or invalid execution plan")
+        return plan
 
     async def _execute_plan(self, task: Task) -> None:
         if not task.plan:
@@ -116,7 +117,11 @@ class OrchestrationEngine:
         while True:
             ready = task.plan.get_ready_steps()
             if not ready:
-                break
+                if task.plan.is_complete or task.plan.has_failures:
+                    break
+                raise RuntimeError(
+                    "Plan stalled: pending steps have missing or cyclic dependencies"
+                )
 
             for step in ready:
                 task.plan.mark_step(step.id, StepStatus.IN_PROGRESS)
@@ -151,7 +156,8 @@ class OrchestrationEngine:
             "3. Security issues\n"
             "4. Performance concerns\n"
             "5. Test coverage gaps\n\n"
-            "Respond with APPROVED if the code is good, or CHANGES_REQUESTED with specific feedback."
+            "Respond with APPROVED if the code is good, or CHANGES_REQUESTED "
+            "with specific feedback."
         )
         return await self.reviewer.run(prompt)
 

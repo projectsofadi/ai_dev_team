@@ -23,7 +23,8 @@ export const configCommand = new Command("config")
         if (
           key.toLowerCase().includes("key") ||
           key.toLowerCase().includes("secret") ||
-          key.toLowerCase().includes("password")
+          key.toLowerCase().includes("password") ||
+          key.toLowerCase().includes("token")
         ) {
           console.log(`  ${chalk.cyan(key)} = ${chalk.dim("****")}`);
         } else {
@@ -40,6 +41,7 @@ export const configCommand = new Command("config")
     const envVars = [
       "OPENAI_API_KEY",
       "ANTHROPIC_API_KEY",
+      "AI_DEV_TEAM_API_KEY",
       "DEFAULT_PROVIDER",
       "DEFAULT_MODEL",
       "API_PORT",

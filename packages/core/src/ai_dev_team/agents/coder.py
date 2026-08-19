@@ -6,7 +6,7 @@ from ai_dev_team.agents.base import BaseAgent
 from ai_dev_team.llm.provider import LLMProvider
 from ai_dev_team.tools.filesystem import FilesystemTool
 from ai_dev_team.tools.git import GitTool
-from ai_dev_team.tools.registry import ToolRegistry
+from ai_dev_team.tools.registry import ApprovalCallback, ToolRegistry
 from ai_dev_team.tools.search import SearchTool
 from ai_dev_team.tools.shell import ShellTool
 
@@ -45,11 +45,16 @@ class CoderAgent(BaseAgent):
         self,
         llm: LLMProvider,
         working_dir: str | None = None,
+        approval_callback: ApprovalCallback | None = None,
     ):
-        tools = ToolRegistry([
-            FilesystemTool(root_dir=working_dir),
-            ShellTool(working_dir=working_dir),
-            GitTool(repo_dir=working_dir),
-            SearchTool(root_dir=working_dir),
-        ])
+        tools = ToolRegistry(
+            [
+                FilesystemTool(root_dir=working_dir),
+                ShellTool(working_dir=working_dir),
+                GitTool(repo_dir=working_dir),
+                SearchTool(root_dir=working_dir),
+            ],
+            enforce_configured_approvals=True,
+            approval_callback=approval_callback,
+        )
         super().__init__(llm=llm, tools=tools)

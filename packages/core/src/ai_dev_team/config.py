@@ -53,15 +53,17 @@ class MemorySettings(BaseSettings):
 class GuardrailSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="")
 
-    require_approval_for_writes: bool = False
-    require_approval_for_shell: bool = False
+    require_approval_for_writes: bool = True
+    require_approval_for_shell: bool = True
     max_cost_per_task_usd: float = 5.00
 
 
 class Settings(BaseSettings):
     """Aggregated settings loaded from environment / .env file."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # Never load configuration from the agent-controlled working directory.
+    # The CLI/API boundary must pass an explicit, curated process environment.
+    model_config = SettingsConfigDict(extra="ignore")
 
     llm: LLMSettings = Field(default_factory=LLMSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)

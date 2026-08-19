@@ -1,6 +1,7 @@
 {
   "name": "@ai-dev-team/cli",
   "version": "0.1.0",
+  "private": true,
   "description": "CLI for the AI Dev Team system",
   "type": "module",
   "bin": {
@@ -10,7 +11,8 @@
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test dist/commands/*.test.js"
   },
   "dependencies": {
     "commander": "^13.0.0",

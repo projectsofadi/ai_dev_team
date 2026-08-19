@@ -31,7 +31,7 @@ class BudgetTracker:
     total_output_tokens: int = 0
     total_cost_usd: float = 0.0
     iteration_count: int = 0
-    start_time: float = field(default_factory=time.time)
+    start_time: float = field(default_factory=time.monotonic)
 
     @classmethod
     def from_settings(cls) -> BudgetTracker:
@@ -50,8 +50,7 @@ class BudgetTracker:
 
         costs = COST_PER_MILLION.get(model, DEFAULT_COST)
         self.total_cost_usd += (
-            input_tokens * costs["input"] / 1_000_000
-            + output_tokens * costs["output"] / 1_000_000
+            input_tokens * costs["input"] / 1_000_000 + output_tokens * costs["output"] / 1_000_000
         )
 
     @property
@@ -60,7 +59,7 @@ class BudgetTracker:
 
     @property
     def elapsed_seconds(self) -> float:
-        return time.time() - self.start_time
+        return time.monotonic() - self.start_time
 
     @property
     def tokens_exceeded(self) -> bool:
@@ -79,7 +78,7 @@ class BudgetTracker:
         return self.elapsed_seconds > self.max_wall_seconds
 
     def check(self) -> str | None:
-        """Return an error message if any budget is exceeded, else None."""
+        """Return an error after measured usage has exceeded a budget."""
         if self.tokens_exceeded:
             return f"Token budget exceeded: {self.total_tokens:,}/{self.max_tokens:,}"
         if self.cost_exceeded:
@@ -88,6 +87,18 @@ class BudgetTracker:
             return f"Iteration limit exceeded: {self.iteration_count}/{self.max_iterations}"
         if self.time_exceeded:
             return f"Time limit exceeded: {self.elapsed_seconds:.0f}s/{self.max_wall_seconds:.0f}s"
+        return None
+
+    def check_before_call(self) -> str | None:
+        """Prevent a new provider call when no measured budget remains."""
+        if self.total_tokens >= self.max_tokens:
+            return f"Token budget exhausted: {self.total_tokens:,}/{self.max_tokens:,}"
+        if self.total_cost_usd >= self.max_cost_usd:
+            return f"Cost budget exhausted: ${self.total_cost_usd:.4f}/${self.max_cost_usd:.2f}"
+        if self.iteration_count >= self.max_iterations:
+            return f"Iteration limit reached: {self.iteration_count}/{self.max_iterations}"
+        if self.elapsed_seconds >= self.max_wall_seconds:
+            return f"Time limit reached: {self.elapsed_seconds:.0f}s/{self.max_wall_seconds:.0f}s"
         return None
 
     @property

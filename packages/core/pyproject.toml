@@ -5,7 +5,9 @@ build-backend = "hatchling.build"
 [project]
 name = "ai-dev-team"
 version = "0.1.0"
-description = "Production-grade AI dev team with Orchestrator, Planner, Coder, Reviewer, and Tester agents"
+description = "Experimental multi-agent development workflow prototype"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.60.0",
@@ -29,10 +31,16 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",
+    "build>=1.2.0",
 ]
 
 [project.scripts]
 ai-dev-team = "ai_dev_team.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/projectsofadi/ai_dev_team"
+Repository = "https://github.com/projectsofadi/ai_dev_team"
+Issues = "https://github.com/projectsofadi/ai_dev_team/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ai_dev_team"]

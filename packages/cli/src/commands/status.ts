@@ -7,12 +7,15 @@ export const statusCommand = new Command("status")
   .description("Check the status of a task or list all tasks")
   .argument("[task-id]", "Task ID to check (omit to list all)")
   .option("-s, --server <url>", "API server URL", DEFAULT_API)
-  .option("-k, --api-key <key>", "API key for authentication")
+  .option("-k, --api-key <key>", "API key (prefer AI_DEV_TEAM_API_KEY env)")
   .action(async (taskId: string | undefined, opts) => {
-    const headers: Record<string, string> = {};
-    if (opts.apiKey) {
-      headers["Authorization"] = `Bearer ${opts.apiKey}`;
+    const apiKey = opts.apiKey || process.env.AI_DEV_TEAM_API_KEY;
+    if (!apiKey) {
+      throw new Error("Set AI_DEV_TEAM_API_KEY before using the CLI");
     }
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${apiKey}`,
+    };
 
     try {
       if (taskId) {
@@ -21,8 +24,7 @@ export const statusCommand = new Command("status")
         });
 
         if (!res.ok) {
-          console.error(chalk.red(`Task not found: ${taskId}`));
-          process.exit(1);
+          throw new Error(`Task request failed (${res.status}): ${taskId}`);
         }
 
         const task = (await res.json()) as Record<string, unknown>;
@@ -31,8 +33,7 @@ export const statusCommand = new Command("status")
         const res = await fetch(`${opts.server}/api/tasks`, { headers });
 
         if (!res.ok) {
-          console.error(chalk.red("Failed to fetch tasks"));
-          process.exit(1);
+          throw new Error(`Failed to fetch tasks (${res.status})`);
         }
 
         const data = (await res.json()) as {
@@ -52,7 +53,7 @@ export const statusCommand = new Command("status")
       }
     } catch (err) {
       console.error(chalk.red(`Error: ${err}`));
-      process.exit(1);
+      throw err;
     }
   });
 

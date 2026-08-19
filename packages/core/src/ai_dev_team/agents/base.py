@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from typing import Any
 
 import structlog
 from pydantic import BaseModel, Field
 
 from ai_dev_team.config import get_settings
+from ai_dev_team.guardrails.budget import BudgetTracker
+from ai_dev_team.guardrails.validators import validate_input, validate_output
 from ai_dev_team.llm.provider import (
     ChatMessage,
     LLMProvider,
@@ -76,12 +77,29 @@ class BaseAgent:
         max_iterations: int | None = None,
         max_tokens_budget: int | None = None,
         timeout: float | None = None,
+        budget_tracker: BudgetTracker | None = None,
     ) -> AgentResult:
         """Execute the ReAct loop until completion or limits are hit."""
         settings = get_settings()
         max_iter = max_iterations or settings.agent.max_agent_iterations
         budget = max_tokens_budget or settings.agent.max_tokens_per_task
         wall_timeout = timeout or settings.agent.agent_timeout_seconds
+
+        input_validation = validate_input(user_message)
+        if not input_validation.valid:
+            return AgentResult(
+                output="",
+                success=False,
+                error="Input rejected: " + "; ".join(input_validation.violations),
+            )
+
+        if budget_tracker is None:
+            budget_tracker = BudgetTracker(
+                max_tokens=budget,
+                max_cost_usd=settings.guardrails.max_cost_per_task_usd,
+                max_iterations=max_iter,
+                max_wall_seconds=wall_timeout,
+            )
 
         messages: list[ChatMessage] = [self._build_system_message()]
         if context:
@@ -107,7 +125,7 @@ class BaseAgent:
                     error=f"Wall-clock timeout after {wall_timeout}s",
                 )
 
-            if total_usage.total_tokens > budget:
+            if total_usage.total_tokens >= budget:
                 return AgentResult(
                     output="",
                     total_usage=total_usage,
@@ -118,18 +136,40 @@ class BaseAgent:
                     error=f"Token budget exceeded: {total_usage.total_tokens}/{budget}",
                 )
 
+            budget_error = budget_tracker.check_before_call()
+            if budget_error:
+                return AgentResult(
+                    output="",
+                    total_usage=total_usage,
+                    iterations=iteration,
+                    elapsed_seconds=elapsed,
+                    tool_calls_made=total_tool_calls,
+                    success=False,
+                    error=budget_error,
+                )
+
             try:
+                remaining_tokens = min(
+                    budget - total_usage.total_tokens,
+                    budget_tracker.max_tokens - budget_tracker.total_tokens,
+                )
                 response: LLMResponse = await asyncio.wait_for(
                     self.llm.chat(
                         messages=messages,
                         tools=tool_defs if tool_defs else None,
                         model=self.model,
                         temperature=self.temperature,
-                        max_tokens=self.max_tokens,
+                        max_tokens=min(self.max_tokens, remaining_tokens),
                     ),
-                    timeout=max(wall_timeout - elapsed, 5),
+                    timeout=max(
+                        min(
+                            wall_timeout - elapsed,
+                            budget_tracker.max_wall_seconds - budget_tracker.elapsed_seconds,
+                        ),
+                        0.001,
+                    ),
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return AgentResult(
                     output="",
                     total_usage=total_usage,
@@ -147,11 +187,28 @@ class BaseAgent:
                     elapsed_seconds=time.monotonic() - start_time,
                     tool_calls_made=total_tool_calls,
                     success=False,
-                    error=f"LLM error: {type(exc).__name__}: {exc}",
+                    error=f"LLM error: {type(exc).__name__}",
                 )
 
             total_usage.input_tokens += response.usage.input_tokens
             total_usage.output_tokens += response.usage.output_tokens
+            budget_tracker.record_usage(
+                response.model or self.model or settings.llm.default_model,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+            )
+
+            budget_error = budget_tracker.check()
+            if budget_error:
+                return AgentResult(
+                    output="",
+                    total_usage=total_usage,
+                    iterations=iteration,
+                    elapsed_seconds=time.monotonic() - start_time,
+                    tool_calls_made=total_tool_calls,
+                    success=False,
+                    error=budget_error,
+                )
 
             logger.info(
                 "agent_iteration",
@@ -163,6 +220,17 @@ class BaseAgent:
             )
 
             if not response.message.tool_calls:
+                output_validation = validate_output(response.message.content)
+                if not output_validation.valid:
+                    return AgentResult(
+                        output="",
+                        total_usage=total_usage,
+                        iterations=iteration,
+                        elapsed_seconds=time.monotonic() - start_time,
+                        tool_calls_made=total_tool_calls,
+                        success=False,
+                        error=("Output blocked: " + "; ".join(output_validation.violations)),
+                    )
                 return AgentResult(
                     output=response.message.content,
                     total_usage=total_usage,
@@ -180,13 +248,15 @@ class BaseAgent:
             if len(recent_hashes) > 3:
                 recent_hashes.pop(0)
             if len(recent_hashes) == 3 and len(set(recent_hashes)) == 1:
-                messages.append(ChatMessage(
-                    role=Role.SYSTEM,
-                    content=(
-                        "You appear to be repeating the same tool calls. "
-                        "Try a different approach or provide a final answer."
-                    ),
-                ))
+                messages.append(
+                    ChatMessage(
+                        role=Role.SYSTEM,
+                        content=(
+                            "You appear to be repeating the same tool calls. "
+                            "Try a different approach or provide a final answer."
+                        ),
+                    )
+                )
                 recent_hashes.clear()
 
             messages.append(response.message)
@@ -195,10 +265,27 @@ class BaseAgent:
             total_tool_calls += len(results)
 
             for result in results:
-                messages.append(ChatMessage(
-                    role=Role.TOOL,
-                    tool_result=result,
-                ))
+                messages.append(
+                    ChatMessage(
+                        role=Role.TOOL,
+                        tool_result=result,
+                    )
+                )
+
+            denied_calls = [result for result in results if result.error_code == "approval_denied"]
+            if denied_calls:
+                return AgentResult(
+                    output="",
+                    total_usage=total_usage,
+                    iterations=iteration,
+                    elapsed_seconds=time.monotonic() - start_time,
+                    tool_calls_made=total_tool_calls,
+                    success=False,
+                    error=(
+                        f"Tool approval denied for {len(denied_calls)} call(s); "
+                        "the requested operation was not executed"
+                    ),
+                )
 
         return AgentResult(
             output="",

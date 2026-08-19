@@ -1,0 +1,13 @@
+**
+!packages/
+!packages/server/
+!packages/server/package.json
+!packages/server/package-lock.json
+!packages/server/tsconfig.json
+!packages/server/src/
+!packages/server/src/**
+!packages/core/
+!packages/core/pyproject.toml
+!packages/core/README.md
+!packages/core/src/
+!packages/core/src/**

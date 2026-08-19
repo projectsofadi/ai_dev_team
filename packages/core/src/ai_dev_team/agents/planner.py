@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from ai_dev_team.agents.base import AgentResult, BaseAgent
-from ai_dev_team.llm.provider import ChatMessage, LLMProvider, Role, ToolDefinition
+from ai_dev_team.guardrails.budget import BudgetTracker
+from ai_dev_team.guardrails.validators import validate_tool_args
+from ai_dev_team.llm.provider import ChatMessage, LLMProvider, ToolDefinition
 from ai_dev_team.orchestration.plan import ExecutionPlan, PlanStep
 from ai_dev_team.tools.registry import ToolRegistry
 
@@ -53,7 +54,10 @@ class PlannerAgent(BaseAgent):
                         "items": {
                             "type": "object",
                             "properties": {
-                                "id": {"type": "string", "description": "Short unique ID (e.g., s1, s2)"},
+                                "id": {
+                                    "type": "string",
+                                    "description": "Short unique ID (e.g., s1, s2)",
+                                },
                                 "title": {"type": "string"},
                                 "description": {"type": "string"},
                                 "agent": {
@@ -87,30 +91,32 @@ class PlannerAgent(BaseAgent):
                 "additionalProperties": False,
             },
         )
+        self._plan_schema = plan_tool.parameters
         super().__init__(llm=llm, tools=tools, extra_tools=[plan_tool])
         self._last_plan: ExecutionPlan | None = None
 
     async def create_plan(self, task_description: str, context: str = "") -> ExecutionPlan:
         """Create a structured execution plan for the given task."""
+        self._last_plan = None
         prompt = f"Create an execution plan for:\n\n{task_description}"
         if context:
             prompt += f"\n\nAdditional context:\n{context}"
 
-        result = await self.run(prompt)
+        await self.run(prompt)
 
-        if self._last_plan:
+        if self._last_plan and self._last_plan.steps:
             return self._last_plan
 
-        return ExecutionPlan(
-            title=f"Plan for: {task_description[:80]}",
-            objective=task_description,
-        )
+        raise RuntimeError("Planner did not call create_plan with at least one executable step")
 
     async def run(
         self,
         user_message: str,
         context: list[ChatMessage] | None = None,
-        **kwargs: Any,
+        max_iterations: int | None = None,
+        max_tokens_budget: int | None = None,
+        timeout: float | None = None,
+        budget_tracker: BudgetTracker | None = None,
     ) -> AgentResult:
         """Override run to intercept create_plan tool calls."""
         original_execute = self.tools.execute
@@ -118,25 +124,29 @@ class PlannerAgent(BaseAgent):
         async def _intercept_execute(tool_call: Any, **kw: Any) -> Any:
             if tool_call.name == "create_plan":
                 args = tool_call.arguments
-                steps = [
-                    PlanStep(
-                        id=s.get("id", f"s{i}"),
-                        title=s["title"],
-                        description=s["description"],
-                        agent=s.get("agent", "coder"),
-                        depends_on=s.get("depends_on", []),
-                        acceptance_criteria=s.get("acceptance_criteria", []),
-                        files_to_create=s.get("files_to_create", []),
-                        files_to_modify=s.get("files_to_modify", []),
-                    )
-                    for i, s in enumerate(args.get("steps", []))
-                ]
-                self._last_plan = ExecutionPlan(
-                    title=args.get("title", ""),
-                    objective=args.get("objective", ""),
-                    steps=steps,
-                )
                 from ai_dev_team.llm.provider import ToolResult
+
+                validation = validate_tool_args(args, self._plan_schema)
+                if not validation.valid:
+                    return ToolResult(
+                        call_id=tool_call.id,
+                        output="Invalid plan: " + "; ".join(validation.violations),
+                        is_error=True,
+                    )
+
+                try:
+                    steps = [PlanStep.model_validate(step) for step in args["steps"]]
+                    self._last_plan = ExecutionPlan(
+                        title=args["title"],
+                        objective=args["objective"],
+                        steps=steps,
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    return ToolResult(
+                        call_id=tool_call.id,
+                        output=f"Invalid plan structure: {exc}",
+                        is_error=True,
+                    )
 
                 return ToolResult(
                     call_id=tool_call.id,
@@ -146,6 +156,13 @@ class PlannerAgent(BaseAgent):
 
         self.tools.execute = _intercept_execute  # type: ignore[assignment]
         try:
-            return await super().run(user_message, context=context, **kwargs)
+            return await super().run(
+                user_message,
+                context=context,
+                max_iterations=max_iterations,
+                max_tokens_budget=max_tokens_budget,
+                timeout=timeout,
+                budget_tracker=budget_tracker,
+            )
         finally:
-            self.tools.execute = original_execute  # type: ignore[assignment]
+            self.tools.execute = original_execute  # type: ignore[method-assign]

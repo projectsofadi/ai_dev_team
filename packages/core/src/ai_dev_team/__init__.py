@@ -1,3 +1,3 @@
-"""AI Dev Team - Production-grade multi-agent development system."""
+"""Experimental multi-agent development workflow components."""
 
 __version__ = "0.1.0"

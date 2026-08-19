@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class StepStatus(str, Enum):
+class StepStatus(StrEnum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
@@ -19,6 +19,8 @@ class StepStatus(str, Enum):
 
 class PlanStep(BaseModel):
     """A single actionable step within an execution plan."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
     title: str
@@ -36,6 +38,8 @@ class PlanStep(BaseModel):
 class ExecutionPlan(BaseModel):
     """A full plan decomposing a task into ordered steps."""
 
+    model_config = ConfigDict(extra="forbid")
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     title: str
     objective: str
@@ -48,8 +52,7 @@ class ExecutionPlan(BaseModel):
         return [
             s
             for s in self.steps
-            if s.status == StepStatus.PENDING
-            and all(dep in completed_ids for dep in s.depends_on)
+            if s.status == StepStatus.PENDING and all(dep in completed_ids for dep in s.depends_on)
         ]
 
     def mark_step(self, step_id: str, status: StepStatus, output: str | None = None) -> None:
@@ -62,9 +65,7 @@ class ExecutionPlan(BaseModel):
 
     @property
     def is_complete(self) -> bool:
-        return all(
-            s.status in (StepStatus.COMPLETED, StepStatus.SKIPPED) for s in self.steps
-        )
+        return all(s.status in (StepStatus.COMPLETED, StepStatus.SKIPPED) for s in self.steps)
 
     @property
     def has_failures(self) -> bool:
